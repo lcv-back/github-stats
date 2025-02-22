@@ -3,10 +3,13 @@
 import asyncio
 import os
 import re
+from dotenv import load_dotenv
 
 import aiohttp
 
 from github_stats import Stats
+
+load_dotenv()
 
 
 ################################################################################

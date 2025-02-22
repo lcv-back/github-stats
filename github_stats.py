@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any, cast
 
 import aiohttp
 import requests
+import time
 
 
 ###############################################################################
@@ -72,15 +73,16 @@ class Queries(object):
         :param params: Query parameters to be passed to the API
         :return: deserialized REST JSON output
         """
+        headers = {
+            "Authorization": f"token {self.access_token}",
+            "Accept": "application/vnd.github.v3+json",  # Add explicit Accept header
+        }
+        if params is None:
+            params = dict()
+        if path.startswith("/"):
+            path = path[1:]
 
-        for _ in range(60):
-            headers = {
-                "Authorization": f"token {self.access_token}",
-            }
-            if params is None:
-                params = dict()
-            if path.startswith("/"):
-                path = path[1:]
+        for attempt in range(3):  # Reduce retry attempts from 60 to 3
             try:
                 async with self.semaphore:
                     r_async = await self.session.get(
@@ -88,33 +90,58 @@ class Queries(object):
                         headers=headers,
                         params=tuple(params.items()),
                     )
-                if r_async.status == 202:
-                    # print(f"{path} returned 202. Retrying...")
-                    print(f"A path returned 202. Retrying...")
-                    await asyncio.sleep(2)
-                    continue
 
-                result = await r_async.json()
-                if result is not None:
-                    return result
-            except:
-                print("aiohttp failed for rest query")
-                # Fall back on non-async requests
-                async with self.semaphore:
-                    r_requests = requests.get(
-                        f"https://api.github.com/{path}",
-                        headers=headers,
-                        params=tuple(params.items()),
-                    )
-                    if r_requests.status_code == 202:
-                        print(f"A path returned 202. Retrying...")
+                    # Handle 204 No Content
+                    if r_async.status == 204:
+                        return {}
+
+                    # Handle rate limiting
+                    if r_async.status == 403:
+                        reset_time = int(r_async.headers.get("X-RateLimit-Reset", 0))
+                        if reset_time:
+                            wait_time = reset_time - int(time.time()) + 1
+                            if wait_time > 0:
+                                print(f"Rate limited. Waiting {wait_time} seconds...")
+                                await asyncio.sleep(wait_time)
+                                continue
+
+                    if r_async.status == 202:
+                        print(f"Processing data. Retrying in 2 seconds...")
                         await asyncio.sleep(2)
                         continue
-                    elif r_requests.status_code == 200:
-                        return r_requests.json()
-        # print(f"There were too many 202s. Data for {path} will be incomplete.")
-        print("There were too many 202s. Data for this repository will be incomplete.")
-        return dict()
+
+                    if r_async.status == 200:
+                        return await r_async.json()
+
+            except Exception as e:
+                print(f"aiohttp failed for rest query: {str(e)}")
+                # Fall back on non-async requests
+                try:
+                    async with self.semaphore:
+                        r_requests = requests.get(
+                            f"https://api.github.com/{path}",
+                            headers=headers,
+                            params=tuple(params.items()),
+                        )
+
+                        # Handle 204 No Content
+                        if r_requests.status_code == 204:
+                            return {}
+
+                        if r_requests.status_code == 200:
+                            return r_requests.json()
+
+                        if r_requests.status_code == 202:
+                            print(f"Processing data. Retrying in 2 seconds...")
+                            await asyncio.sleep(2)
+                            continue
+                except Exception as e:
+                    print(f"Request failed: {str(e)}")
+                    await asyncio.sleep(1)
+                    continue
+
+        print(f"Failed to get data for {path} after multiple attempts")
+        return {}
 
     @staticmethod
     def repos_overview(
