@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any, cast
 import aiohttp
 import requests
 import time
+from functools import cached_property
 
 
 ###############################################################################
@@ -285,11 +286,13 @@ class Stats(object):
         exclude_repos: Optional[Set] = None,
         exclude_langs: Optional[Set] = None,
         ignore_forked_repos: bool = False,
+        ignore_private_repos: bool = False,
     ):
         self.username = username
         self._ignore_forked_repos = ignore_forked_repos
         self._exclude_repos = set() if exclude_repos is None else exclude_repos
         self._exclude_langs = set() if exclude_langs is None else exclude_langs
+        self._ignore_private_repos = ignore_private_repos
         self.queries = Queries(username, access_token, session)
 
         self._name: Optional[str] = None
@@ -463,15 +466,49 @@ Languages:
         return {k: v.get("prop", 0) for (k, v) in self._languages.items()}
 
     @property
-    async def repos(self) -> Set[str]:
+    async def repos(self) -> Dict[str, Dict]:
         """
-        :return: list of names of user's repos
+        Get all repositories for a user
         """
-        if self._repos is not None:
-            return self._repos
-        await self.get_stats()
-        assert self._repos is not None
-        return self._repos
+        if not hasattr(self, "_repos_cache"):
+            repositories = await self.queries.query(
+                """
+                query {
+                  viewer {
+                    repositories(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                      nodes {
+                        nameWithOwner
+                        stargazerCount
+                        forkCount
+                        isPrivate
+                        isFork
+                        languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
+                          edges {
+                            size
+                            node {
+                              color
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """
+            )
+            # Filter repositories
+            self._repos_cache = {
+                repo["nameWithOwner"]: repo
+                for repo in repositories.get("data", {})
+                .get("viewer", {})
+                .get("repositories", {})
+                .get("nodes", [])
+                if repo["nameWithOwner"] not in self._exclude_repos
+                and (not self._ignore_forked_repos or not repo["isFork"])
+                and (not self._ignore_private_repos or not repo["isPrivate"])
+            }
+        return self._repos_cache
 
     @property
     async def total_contributions(self) -> int:
@@ -539,7 +576,8 @@ Languages:
             return self._views
 
         total = 0
-        for repo in await self.repos:
+        repos_data = await self.repos  # Store the result first
+        for repo in repos_data:
             r = await self.queries.query_rest(f"/repos/{repo}/traffic/views")
             for view in r.get("views", []):
                 total += view.get("count", 0)

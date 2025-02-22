@@ -131,6 +131,7 @@ async def main() -> None:
             exclude_repos=excluded_repos,
             exclude_langs=excluded_langs,
             ignore_forked_repos=ignore_forked_repos,
+            ignore_private_repos=True,
         )
         await asyncio.gather(generate_languages(s), generate_overview(s))
 
